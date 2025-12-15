@@ -10,7 +10,7 @@ The simulation follows the process $X_t = Q X_{t-1} + \xi_t$, where $Q$ is the c
 
 **Gaussianity (Default)**
 The current implementation (`run_w2_simulation`) uses the analytical closed-form solution for the 2-Wasserstein distance:
-$$W_2^2 = (\mu_t - \mu_\infty)^2 + (\sigma_t - \sigma_\infty)^2$$
+$$W_2^2 = (\mu_t - \mu_\infty)^2 + (\sigma_t - \sigma_\infty)^2$$.
 This offers high computational efficiency but is strictly valid only for Gaussian noise. 
 
 **Non-Gaussian Support**
@@ -19,6 +19,9 @@ For general distributions (e.g., Uniform, Laplacian), the framework supports ext
 2.  **Unknown $F^{-1}$:** Empirical quantile estimation using Monte Carlo particle simulations.
 
 *Note: The core matrix evolution logic remains valid for any distribution; only the distance metric calculation requires adaptation.*
+
+**AI-assisted**
+While the core logic of the method applies to general distributions, implementing the required numerical routines for non-Gaussian cases can be technically complex. In this repository, AI-based tools were used to assist with routine implementation tasks such as numerical integration and code vectorization.
 
 ## Features
 
