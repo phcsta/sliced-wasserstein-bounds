@@ -1,179 +1,131 @@
-"""
-Projected Wasserstein distance for a Gaussian AR(1) process.
+"""Projected Wasserstein-2 distance for a Gaussian autoregressive process.
 
-We consider
-    X_{t+1} = Q X_t + eta_{t+1},
-    eta_t ~ N(0, C),
+    X_t = Q X_{t-1} + eta_t,   X_0 = x0,   eta_t ~ N(0, C) i.i.d.
 
-with deterministic initial condition X_0 = x0.
-
-For a fixed direction v, the code computes the W_2 distance between
-the law of <v, X_t> and its stationary Gaussian distribution, together
-with the corresponding lower and upper bounds.
+C denotes the innovation covariance Sigma Xi Sigma^T in the manuscript.
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
-
 from scipy.linalg import solve_discrete_lyapunov
-from scipy.special import gammaln
-from matplotlib.ticker import MaxNLocator
 
 
-def gaussian_moment_constant(r=2.0):
-    """Return (E|Z|^r)^(1/r) for Z ~ N(0,1)."""
-    if r < 1:
-        raise ValueError("r must be at least one")
+def simulate_wasserstein(Q, C, v, x0, max_time=100):
+    """Compute W2(v^T X_t, v^T X_inf) and its bounds for t = 0, ..., max_time.
 
-    log_moment = (
-        0.5 * r * np.log(2.0)
-        + gammaln((r + 1.0) / 2.0)
-        - 0.5 * np.log(np.pi)
-    )
-
-    return np.exp(log_moment / r)
-
-
-def projected_wasserstein(Q, C, v, x0, T=100):
-    """
-    Compute the projected W_2 distance and its bounds for t=0,...,T.
-
-    Parameters
-    ----------
-    Q : (d,d) array
-        Transition matrix.
-    C : (d,d) array
-        Covariance matrix of the Gaussian innovations.
-    v : (d,) array
-        Projection direction.
-    x0 : (d,) array
-        Deterministic initial condition.
-    T : int
-        Final time.
-
-    Returns
-    -------
-    dict
-        Arrays containing time, exact projected W_2 distance,
-        lower bound, and upper bound.
+    Q must be Schur stable and C positive semidefinite. The projection v
+    is not normalized; its stationary variance must be positive.
+    Return a dictionary of arrays with keys 't', 'lb', 'ub', and 'w2'.
     """
     Q = np.asarray(Q, dtype=float)
     C = np.asarray(C, dtype=float)
     v = np.asarray(v, dtype=float)
     x0 = np.asarray(x0, dtype=float)
 
+    if Q.ndim != 2 or Q.shape[0] == 0 or Q.shape[0] != Q.shape[1]:
+        raise ValueError("Q must be a nonempty square matrix.")
     d = Q.shape[0]
+    if C.shape != (d, d) or v.shape != (d,) or x0.shape != (d,):
+        raise ValueError("C, v and x0 must have dimensions compatible with Q.")
+    if not all(np.isfinite(a).all() for a in (Q, C, v, x0)):
+        raise ValueError("All inputs must be finite.")
+    if not np.any(v):
+        raise ValueError("v must be nonzero.")
+    if (
+        not isinstance(max_time, (int, np.integer))
+        or isinstance(max_time, (bool, np.bool_))
+        or max_time < 0
+    ):
+        raise ValueError("max_time must be a nonnegative integer.")
+    if np.max(np.abs(np.linalg.eigvals(Q))) >= 1.0:
+        raise ValueError("Q must be Schur stable: spectral radius < 1.")
+    if not np.allclose(C, C.T, rtol=1e-12, atol=0.0):
+        raise ValueError("C must be symmetric.")
+    C = (C + C.T) / 2.0
+    eps = np.finfo(float).eps
+    tol_C = 100 * eps * np.linalg.norm(C, ord=2)
+    if np.linalg.eigvalsh(C).min() < -tol_C:
+        raise ValueError("C must be positive semidefinite.")
 
-    if Q.shape != (d, d):
-        raise ValueError("Q must be square")
-    if C.shape != (d, d):
-        raise ValueError("C has incompatible dimension")
-    if v.shape != (d,) or x0.shape != (d,):
-        raise ValueError("v and x0 have incompatible dimensions")
-    if np.max(np.abs(np.linalg.eigvals(Q))) >= 1:
-        raise ValueError("Q must be Schur stable")
+    Sigma_inf = solve_discrete_lyapunov(Q, C)
+    Sigma_inf = (Sigma_inf + Sigma_inf.T) / 2.0
+    var_inf = float(v @ Sigma_inf @ v)
+    if not np.isfinite(var_inf) or var_inf <= 0.0:
+        raise ValueError("The stationary projected variance must be positive.")
+    sigma_inf = np.sqrt(var_inf)
+    tol_var = 100 * eps * var_inf
 
-    C = 0.5 * (C + C.T)
+    result = {"t": np.arange(max_time + 1)}
+    for name in ("lb", "ub", "w2"):
+        result[name] = np.empty(max_time + 1)
 
-    Sigma = solve_discrete_lyapunov(Q, C)
-    Sigma = 0.5 * (Sigma + Sigma.T)
-
-    sigma2_inf = v @ Sigma @ v
-    if sigma2_inf <= 0:
-        raise ValueError("The stationary projected variance must be positive")
-
-    sigma_inf = np.sqrt(sigma2_inf)
-    C2 = gaussian_moment_constant(2.0)
-
-    time = np.arange(T + 1)
-    w2 = np.zeros(T + 1)
-    lower = np.zeros(T + 1)
-    upper = np.zeros(T + 1)
-
-    Qt = np.eye(d)
+    Q_t = np.eye(d)
     Sigma_t = np.zeros((d, d))
 
-    for t in time:
-        mean_t = v @ Qt @ x0
-        sigma2_t = v @ Sigma_t @ v
-        sigma_t = np.sqrt(max(sigma2_t, 0.0))
+    for t in range(max_time + 1):
+        mu_t = float(v @ Q_t @ x0)
+        var_t = float(v @ Sigma_t @ v)
 
-        vt = Qt.T @ v
-        covariance_remainder = vt @ Sigma @ vt
+        # gamma_t = v^T (Sigma_inf - Sigma_t) v.
+        u_t = Q_t.T @ v
+        gamma_t = float(u_t @ Sigma_inf @ u_t)
 
-        lower[t] = abs(mean_t)
-        upper[t] = (
-            abs(mean_t)
-            + C2 * covariance_remainder / sigma_inf
-        )
+        if var_t < -tol_var or gamma_t < -tol_var:
+            raise FloatingPointError("Negative variance or covariance tail.")
+        sigma_t = np.sqrt(max(var_t, 0.0))
+        gamma_t = max(gamma_t, 0.0)
 
-        # Exact W_2 distance between one-dimensional Gaussian laws.
-        w2[t] = np.hypot(mean_t, sigma_t - sigma_inf)
+        # Rationalize sigma_inf - sigma_t to avoid cancellation at large t.
+        delta_sigma = gamma_t / (sigma_inf + sigma_t)
 
-        Sigma_t = Q @ Sigma_t @ Q.T + C
-        Qt = Q @ Qt
+        result["lb"][t] = abs(mu_t)
+        result["ub"][t] = abs(mu_t) + gamma_t / sigma_inf
+        result["w2"][t] = np.hypot(mu_t, delta_sigma)
 
-    return {
-        "t": time,
-        "w2": w2,
-        "lower": lower,
-        "upper": upper,
-    }
+        if t < max_time:
+            Sigma_t = Sigma_t + Q_t @ C @ Q_t.T
+            Sigma_t = (Sigma_t + Sigma_t.T) / 2.0
+            Q_t = Q @ Q_t
+
+    return result
 
 
-def plot_wasserstein(data, v=None):
-    fig, ax = plt.subplots(figsize=(9, 5.5))
+def plot_results(result):
+    """Plot the distance and bounds."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
 
+    fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(
-        data["t"],
-        data["w2"],
-        "o",
-        ms=4,
-        color="0.2",
-        label=r"$W_2$",
+        result["t"], result["w2"], "o", color="0.2",
+        markersize=4, label=r"Projected $\mathcal{W}_2$",
     )
-    ax.plot(
-        data["t"],
-        data["lower"],
-        "--",
-        lw=1.5,
-        label="lower bound",
-    )
-    ax.plot(
-        data["t"],
-        data["upper"],
-        "--",
-        lw=1.5,
-        label="upper bound",
-    )
-
+    ax.plot(result["t"], result["lb"], "--", label="Lower bound")
+    ax.plot(result["t"], result["ub"], "--", label="Upper bound")
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.set_xlabel(r"$t$")
-    ax.set_ylabel(r"projected $W_2$")
-    
-    if v is not None:
-        ax.set_title(rf"Projection along $v={np.asarray(v)}$")
-
-    ax.grid(alpha=0.25)
-    ax.legend()
+    ax.set(
+        xlabel="Time step", ylabel="Distance",
+        title="Fixed-direction Gaussian Wasserstein-2 distance",
+    )
+    ax.grid(alpha=0.3)
+    ax.legend(frameon=False)
     fig.tight_layout()
-
     return fig, ax
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
 
+    # Symmetric example from the manuscript.
     Q = np.array([
-        [49, -28, -10],
-        [-28, 25, -38],
-        [-10, -38, 16],
-    ], dtype=float) / 90.0
-
+        [49.0, -28.0, -10.0],
+        [-28.0, 25.0, -38.0],
+        [-10.0, -38.0, 16.0],
+    ]) / 90.0
     C = np.eye(3)
-    x0 = np.ones(3)
+    x0 = np.array([2.0, -1.0, 1.5])
     v = np.ones(3)
+    T = 20
 
-    data = projected_wasserstein(Q, C, v, x0, T=20)
-
-    plot_wasserstein(data, v)
+    results = simulate_wasserstein(Q, C, v, x0, max_time=T)
+    plot_results(results)
     plt.show()
